@@ -1,59 +1,106 @@
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_BME280.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <esp_wifi.h>
+#include "Globals.h"
+#include "LCDgraphics.h"
+#include "FetchApi.h"
 
-#define PageSwapPin 32
-#define SubPageSwapPin 35
+char inputCity[25] = "";
+WiFiManagerParameter custom_city_key("City", "Enter your city (to specify use ',' eg. London,CA)", inputCity, 25);
 
-#define HomePage 0
-#define SettingPage 1
+// Dump data from NVS
+void printSavedCredentials() {
+  // ESP can crash or return garbage
+  if (WiFi.getMode() == WIFI_OFF) {
+    WiFi.mode(WIFI_STA); 
+  }
 
-// Global
-LiquidCrystal_I2C lcd(0x27, 20, 4);
-int page = 0;
-int subPage = 0;
-int lastPage = -1;
-unsigned long lastInputTime = 0;
-Adafruit_BME280 bme;
+  wifi_config_t conf;
+  
+  // Config from the ESP-IDF driver
+  // WIFI_IF_STA means "Station Interface" (the client mode)
+  esp_wifi_get_config(WIFI_IF_STA, &conf);
 
-// Custom symbols
-byte house[8] = {
-  0b00100,
-  0b01110,
-  0b01110,
-  0b11111,
-  0b11111,
-  0b11111,
-  0b10101,
-  0b11111
-};
+  // Cast the raw bytes to char*
+  const char* ssid = reinterpret_cast<const char*>(conf.sta.ssid);
+  const char* password = reinterpret_cast<const char*>(conf.sta.password);
 
-byte thermometer[8] = {
-  0b00100,
-  0b01010,
-  0b01010,
-  0b01010,
-  0b01010,
-  0b10001,
-  0b10001,
-  0b01110
-};
+  Serial.println("--- DUMPING NVS CREDENTIALS ---");
+  
+  if (String(ssid).length() > 0) {
+    Serial.print("SSID: ");
+    Serial.println(ssid);
+    Serial.print("Password: ");
+    Serial.println(password);
+  } else {
+    Serial.println("No credentials saved in NVS.");
+  }
+  
+  Serial.println("-------------------------------");
+}
+
+// Callback, when pressed "Save" in WiFiManager
+void saveConfigCallback() {
+  Serial.println("Credentials saved");
+
+  // Reload menu
+  settings.APEnabled = false;
+  lastPage = -1;
+
+  String newSSID = wm.getWiFiSSID();
+  String newPass = wm.getWiFiPass();
+
+  Serial.print("New SSID: ");
+  Serial.println(newSSID);
+
+  strcpy(inputCity, custom_city_key.getValue());
+
+  shouldConnect = true;
+}
 
 void setup() {
+  // Preferences
+  preferences.begin("weather-app", false);
+  apiData.init();
+  
+  // Wifi setup
+  WiFi.mode(WIFI_STA);
+  wm.setSaveConfigCallback(saveConfigCallback);
+  wm.setConnectTimeout(1);
+  wm.setBreakAfterConfig(true);
+  wm.setConfigPortalBlocking(false);
+  wm.addParameter(&custom_city_key);
+
+  // Serial setup
   Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println("Meteo station started ...");
+
+  printSavedCredentials();
+
+  pinMode(OkButtonPin, INPUT_PULLUP);
+
+  // Settings setup
+  settings.APEnabled = false;
+  settings.backlight = true;
+  shouldConnect = true; // Always try to connect to previous network
 
   // LCD initialization
-  lcd.init();
+  lcd.begin();
   lcd.backlight();
-  lcd.setCursor(0,0);
+  lcd.setCursor(0, 0);
   lcd.createChar(0, house);
   lcd.createChar(1, thermometer);
-  
+
   // BME280 Initialization
   if (!bme.begin(0x76)) {
     Serial.println("Sensor Error!");
     lcd.clear();
     lcd.print("Sensor Error!");
-    while (1);
+    while (1)
+      ;
   }
 }
 
@@ -62,143 +109,39 @@ void loop() {
   drawMenu();
   updateMenu();
 
-  int val = analogRead(SubPageSwapPin);
-  Serial.println(val);
-}
+  // int val = digitalRead(OkButtonPin);
+  // Serial.println(val);
 
-void handleInput() {
-  if (millis() - lastInputTime < 400) return; 
+  wm.process();
 
-  int val = analogRead(PageSwapPin);
-  int subPageVal = analogRead(SubPageSwapPin);
-  bool changed = false;
+  if (shouldConnect) {
+    shouldConnect = false;
 
-  if (val > 3000) {
-    page--;
-    changed = true;
-  } else if (val < 1500) {
-    page++;
-    changed = true;
+    WiFi.mode(WIFI_STA);
+
+    Serial.println("Initiating Background Connection...");
+    WiFi.begin();
   }
 
-  // Setting page
-  if (page == SettingPage) {
-    if (subPageVal > 3000){
-      subPage++;
-      changed = true;
-      lastPage = -1;
-    } else if (subPageVal < 1500) {
-      subPage--;
-      changed = true;
-      lastPage = -1;
-    }
-  }
+  // Update weater logic
+  if (millis() - weatherTimer > 5000) {
+    Serial.print("[Loop] City: ");
+    Serial.println(inputCity);
 
-  if (!changed) return;
 
-  lastInputTime = millis();
+    if (strlen(inputCity) > 0) {
+      GeoLocation returnLoc = getGeoFromCity(String(inputCity));
 
-  if (page > 2) page = 0;
-  if (page < 0) page = 2;
+      if (returnLoc.found) {
+        inputCity[0] = '\0';
+        getWeather();
+      } else {
+        Serial.println("[Loop] Failed to get city ...");
+      }
+    } else getWeather();
+    
+    // getGeoFromCity("Lviv");
 
-  if (subPage > 2) subPage = 0;
-  if (subPage < 0) subPage = 2;
-}
-
-void drawMenu() {
-  if (page == lastPage) return;
-
-  lcd.clear();
-
-  switch (page) {
-    case HomePage:
-      lcd.setCursor(0, 0);
-      lcd.write(byte(0));
-      lcd.print(" HOME    ");
-      lcd.write(byte(1));
-      lcd.print(" LVIV");
-      break;
-    case SettingPage:
-      lcd.setCursor(0, 0);
-      lcd.print("---   Settings   ---");
-      displaySettingMenu();
-      break;
-    case 2:
-      lcd.setCursor(0, 0);
-      lcd.print("Page 3 (Info)");
-      break;
-  }
-
-  lastPage = page;
-}
-
-void displaySettingMenu(){
-  switch (subPage){
-    case 0:
-      lcd.setCursor(0, 1);
-      lcd.print("* Option 1 [+]");
-      lcd.setCursor(0, 2);
-      lcd.print("Option 2 [-]");
-      lcd.setCursor(0, 3);
-      lcd.print("Option 3 [-]");
-      break;
-    case 1:
-      lcd.setCursor(0, 1);
-      lcd.print("Option 1 [+]");
-      lcd.setCursor(0, 2);
-      lcd.print("* Option 2 [-]");
-      lcd.setCursor(0, 3);
-      lcd.print("Option 3 [-]");
-      break;
-    case 2:
-      lcd.setCursor(0, 1);
-      lcd.print("Option 1 [+]");
-      lcd.setCursor(0, 2);
-      lcd.print("Option 2 [-]");
-      lcd.setCursor(0, 3);
-      lcd.print("* Option 3 [-]");
-      break;
-  }
-}
-
-void updateMenu(){
-  float temp = bme.readTemperature();
-  float hum = bme.readHumidity();
-  float pres = bme.readPressure() / 100.0F;
-  
-  Serial.print("Temp: "); Serial.print(temp);
-  Serial.print(" Hum: "); Serial.print(hum);
-  Serial.print(" Pres: "); Serial.println(pres);
-
-  switch (page) {
-    case HomePage:
-      lcd.setCursor(0, 1);
-      lcd.print("T : ");
-      lcd.print(temp, 1);
-      //
-      lcd.print("  N/A     ");
-      lcd.print((char)223);
-      lcd.print("C");
-
-      lcd.setCursor(0, 2);
-      lcd.print("H : ");
-      lcd.print(hum, 1);
-      //
-      lcd.print("  N/A      %");
-
-      lcd.setCursor(0, 3);
-      lcd.print("P :");
-      lcd.print(pres, 1);
-      //
-      lcd.print("  N/A    hPa");
-      break;
-    case SettingPage:
-      lcd.setCursor(0, 0);
-      lcd.print("---   Settings   ---");
-      break;
-    case 2:
-      lcd.setCursor(0, 0);
-      lcd.print("Page 3 (Info)");
-      break;
+    weatherTimer = millis();
   }
 }
