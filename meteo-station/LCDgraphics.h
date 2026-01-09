@@ -3,6 +3,7 @@
 
 #include "Globals.h"
 #include <esp_wifi.h>
+#include <soc/gpio_struct.h>  // GPIO access
 
 const char* wl_status_to_string(wl_status_t status) {
   switch (status) {
@@ -55,8 +56,12 @@ void handleInput() {
       lastPage = -1;
     }
 
+    // digitalRead(OkButtonPin)
+    // Read entire 32-bit GPIO input register using GPIO.in and take needed bit
+    bool btnState = (GPIO.in >> OkButtonPin) & 1;
+
     // Button pressed (0)
-    if (!digitalRead(OkButtonPin) && okButtonWasReleased) {
+    if (!btnState && okButtonWasReleased) {
       okButtonWasReleased = false;
       lastPage = -1;
       switch (subPage) {
@@ -83,7 +88,7 @@ void handleInput() {
       }
     }
     // Button released (1)
-    if (digitalRead(OkButtonPin)) okButtonWasReleased = true;
+    if (btnState) okButtonWasReleased = true;
   }
 
   if (!changed) return;

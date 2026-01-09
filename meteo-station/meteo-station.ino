@@ -6,6 +6,7 @@
 #include "Globals.h"
 #include "LCDgraphics.h"
 #include "FetchApi.h"
+#include <soc/gpio_struct.h>  // GPIO access
 
 char inputCity[25] = "";
 WiFiManagerParameter custom_city_key("City", "Enter your city (to specify use ',' eg. London,CA)", inputCity, 25);
@@ -80,7 +81,16 @@ void setup() {
 
   printSavedCredentials();
 
-  pinMode(OkButtonPin, INPUT_PULLUP);
+  // pinMode(OkButtonPin, INPUT_PULLUP);
+  gpio_config_t conf = {};
+  conf.pin_bit_mask = (1ULL << OkButtonPin);
+  conf.mode = GPIO_MODE_INPUT;
+  conf.pull_up_en = GPIO_PULLUP_ENABLE;
+  conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  conf.intr_type = GPIO_INTR_DISABLE;        // Disable interrupts
+
+  // Apply config
+  gpio_config(&conf);
 
   // Settings setup
   settings.APEnabled = false;
